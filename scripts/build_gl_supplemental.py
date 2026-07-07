@@ -56,7 +56,17 @@ TAB_ORDER = [
     "Validation Report",
 ]
 
-DATE_COLUMN_CANDIDATES = ["Accounting Period", "Accounting Date", "Date"]
+DATE_COLUMN_CANDIDATES = ["ACCOUNTING_PERIOD", "ACCOUNTING PERIOD", "ACCOUNTING_DATE",
+                          "ACCOUNTING DATE", "PERIOD", "DATE"]
+
+COLUMN_ALIASES = {
+    "COST CENTER": "COST CENTER",
+    "COST_CENTER": "COST CENTER",
+    "ACCOUNT": "ACCOUNT",
+    "AMOUNT": "AMOUNT",
+    "JE SOURCE": "JE SOURCE",
+    "JE_SOURCE": "JE SOURCE",
+}
 
 
 # ---------------------------------------------------------------------------
@@ -101,19 +111,31 @@ def detect_data_sheet(wb, explicit_name):
     return candidates[0]
 
 
+def find_header_row(ws, max_scan=20):
+    for row_num in range(1, max_scan + 1):
+        values = [c.value for c in ws[row_num]]
+        upper = [str(v).strip().upper() for v in values if v is not None]
+        if "COST CENTER" in upper or "COST_CENTER" in upper:
+            return row_num
+    return 1
+
+
 def load_rows(path, sheetname):
     wb = openpyxl.load_workbook(path, data_only=True)
     ws = wb[sheetname]
-    headers = [c.value for c in ws[1]]
+    header_row = find_header_row(ws)
+    raw_headers = [c.value for c in ws[header_row]]
+    headers = [str(h).strip().upper() if h is not None else None for h in raw_headers]
+    original_headers = [str(h).strip() if h is not None else None for h in raw_headers]
     idx = {h: i for i, h in enumerate(headers) if h}
     rows = []
     total_rows = 0
-    for r in ws.iter_rows(min_row=2, values_only=True):
+    for r in ws.iter_rows(min_row=header_row + 1, values_only=True):
         total_rows += 1
         if all(v is None or v == '' for v in r):
             continue
         rows.append(r)
-    return idx, rows, total_rows
+    return idx, rows, total_rows, original_headers
 
 
 def style_header(ws, row, ncols, start_col=1):
@@ -169,7 +191,7 @@ def detect_date_column(idx):
 
 
 def extract_gl(idx, rows, source_name):
-    required = ["Cost Center", "Account", "Amount"]
+    required = ["COST CENTER", "ACCOUNT", "AMOUNT"]
     date_col = detect_date_column(idx)
     if date_col:
         required_check = required + [date_col]
@@ -180,7 +202,7 @@ def extract_gl(idx, rows, source_name):
     if missing_cols:
         raise SystemExit(f"GL Supplemental: missing required column(s): {missing_cols}")
 
-    je_col = idx.get("JE Source")
+    je_col = idx.get("JE SOURCE")
     included = []
     missing_cc = missing_acct = blank_amt = invalid_amt = negative_amt = 0
     manual_excluded = 0
@@ -188,9 +210,9 @@ def extract_gl(idx, rows, source_name):
     dup_counter = Counter()
 
     for r in rows:
-        cc = r[idx["Cost Center"]]
-        acct = r[idx["Account"]]
-        amt_raw = r[idx["Amount"]]
+        cc = r[idx["COST CENTER"]]
+        acct = r[idx["ACCOUNT"]]
+        amt_raw = r[idx["AMOUNT"]]
         dt = to_date(r[idx[date_col]]) if date_col else None
         je_source = str(r[je_col]).strip() if je_col is not None and r[je_col] not in (None, '') else None
         amt = to_float(amt_raw)
@@ -253,7 +275,7 @@ def build(args):
     gl_sheet = detect_data_sheet(gl_wb, args.gl_sheet)
     print(f"GL Supplemental: {args.gl_file} [{gl_sheet}]")
 
-    idx, rows, raw_count = load_rows(args.gl_file, gl_sheet)
+    idx, rows, raw_count, original_headers = load_rows(args.gl_file, gl_sheet)
     included, val = extract_gl(idx, rows, args.gl_file.split('/')[-1])
     val['raw_file_rows'] = raw_count
 
@@ -567,11 +589,8 @@ def build(args):
 
     # -- Filtered GL Detail --
     ws8 = wb.create_sheet("Filtered GL Detail")
-    headers_sorted = [None] * len(idx)
-    for h, i in idx.items():
-        headers_sorted[i] = h
-    ws8.append(headers_sorted)
-    style_header(ws8, 1, len(headers_sorted))
+    ws8.append(original_headers)
+    style_header(ws8, 1, len(original_headers))
     for r_ in included:
         ws8.append(list(r_['raw']))
     for row in ws8.iter_rows(min_row=2):
