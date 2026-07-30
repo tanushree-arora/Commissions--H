@@ -23,21 +23,35 @@ Optional flags (see --help for the full list):
                                         else today.
     --output                           Default: Commissions_Accrual_Output_<Period>_<Year>.xlsx
 
-Requires: openpyxl, Pillow (see requirements.txt).
+Accepts both modern .xlsx and legacy .xls source files (auto-detected by
+extension). Note: embedded screenshot images can only be auto-extracted from
+.xlsx sources -- for .xls inputs, the Audit Evidence sheet and Validation
+Report will disclose that screenshots could not be extracted rather than
+silently omitting them.
+
+Requires: openpyxl, Pillow, xlrd (see requirements.txt).
 """
 import argparse
 import io
+import os
 import sys
 import zipfile
 from collections import defaultdict, Counter
 from datetime import date, datetime
 
 import openpyxl
+import xlrd
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 from openpyxl.utils import get_column_letter
 from openpyxl.chart import BarChart, LineChart, PieChart, Reference
 from openpyxl.chart.data_source import AxDataSource, StrRef
 from openpyxl.drawing.image import Image as XLImage
+
+# Legacy .xls (pre-2007 binary format) is read via xlrd; modern .xlsx via
+# openpyxl. Both are normalized to the same (idx, rows, total_rows) shape
+# by load_rows() below, so everything downstream is format-agnostic.
+def is_legacy_xls(path):
+    return path.lower().endswith(".xls")
 
 FISCAL_CALENDAR = {
     "P01": 17, "P02": 17, "P03": 22, "P04": 17, "P05": 17, "P06": 22,
@@ -124,19 +138,25 @@ def to_date(v):
     return None
 
 
-def detect_data_sheet(wb, explicit_name):
+def get_sheet_names(path):
+    if is_legacy_xls(path):
+        return xlrd.open_workbook(path, on_demand=True).sheet_names()
+    return openpyxl.load_workbook(path, read_only=True).sheetnames
+
+
+def detect_data_sheet(path, explicit_name):
     if explicit_name:
         return explicit_name
-    candidates = [n for n in wb.sheetnames if n.strip().lower() != "screenshots"]
+    candidates = [n for n in get_sheet_names(path) if n.strip().lower() != "screenshots"]
     if len(candidates) != 1:
         raise SystemExit(
-            f"Could not auto-detect the data sheet (candidates: {candidates}). "
+            f"Could not auto-detect the data sheet in {path} (candidates: {candidates}). "
             f"Pass --made-sheet/--remaining-sheet explicitly."
         )
     return candidates[0]
 
 
-def load_rows(path, sheetname):
+def _load_rows_xlsx(path, sheetname):
     wb = openpyxl.load_workbook(path, data_only=True)
     ws = wb[sheetname]
     headers = [c.value for c in ws[1]]
@@ -149,6 +169,36 @@ def load_rows(path, sheetname):
             continue
         rows.append(r)
     return idx, rows, total_rows
+
+
+def _load_rows_xls(path, sheetname):
+    wb = xlrd.open_workbook(path)
+    sh = wb.sheet_by_name(sheetname)
+    headers = sh.row_values(0)
+    idx = {h: i for i, h in enumerate(headers) if h}
+    rows = []
+    total_rows = 0
+    for rix in range(1, sh.nrows):
+        total_rows += 1
+        raw = sh.row_values(rix)
+        types = sh.row_types(rix)
+        if all(v == '' for v in raw):
+            continue
+        converted = []
+        for v, t in zip(raw, types):
+            if t == 3:  # XL_CELL_DATE
+                v = xlrd.xldate_as_datetime(v, wb.datemode)
+            elif v == '':
+                v = None
+            converted.append(v)
+        rows.append(tuple(converted))
+    return idx, rows, total_rows
+
+
+def load_rows(path, sheetname):
+    if is_legacy_xls(path):
+        return _load_rows_xls(path, sheetname)
+    return _load_rows_xlsx(path, sheetname)
 
 
 def extract(idx, rows, label):
@@ -225,12 +275,25 @@ def detect_asof_date(idx, rows):
 
 
 def extract_screenshot_images(path):
-    """Read embedded images from a workbook's zip directly into memory."""
+    """Read embedded images from an .xlsx workbook's zip directly into memory.
+
+    Legacy .xls stores embedded pictures as Escher/OLE drawing records inside
+    the binary stream rather than as discrete zip entries, so there is no
+    equivalent lightweight extraction here -- callers must check
+    supports_screenshot_extraction(path) and disclose the gap rather than
+    silently claim screenshots were preserved.
+    """
+    if is_legacy_xls(path):
+        return []
     images = []
     z = zipfile.ZipFile(path)
     for name in sorted(n for n in z.namelist() if n.startswith('xl/media/')):
         images.append((name.split('/')[-1], z.read(name)))
     return images
+
+
+def supports_screenshot_extraction(path):
+    return not is_legacy_xls(path)
 
 
 # ---------------------------------------------------------------------------
@@ -285,10 +348,8 @@ def truncate(label, n=20):
 # ---------------------------------------------------------------------------
 
 def build(args):
-    made_wb = openpyxl.load_workbook(args.made_file, data_only=True)
-    made_sheet = detect_data_sheet(made_wb, args.made_sheet)
-    remain_wb = openpyxl.load_workbook(args.remaining_file, data_only=True)
-    remain_sheet = detect_data_sheet(remain_wb, args.remaining_sheet)
+    made_sheet = detect_data_sheet(args.made_file, args.made_sheet)
+    remain_sheet = detect_data_sheet(args.remaining_file, args.remaining_sheet)
 
     print(f"Payment Made:      {args.made_file} [{made_sheet}]")
     print(f"Payment Remaining: {args.remaining_file} [{remain_sheet}]")
@@ -566,9 +627,13 @@ def build(args):
     autosize(ws10, [30, 20, 20])
     ws10["A1"] = "Validation Report"
     ws10["A1"].font = TITLE_FONT
+    made_screenshots_ok = supports_screenshot_extraction(args.made_file)
+    remain_screenshots_ok = supports_screenshot_extraction(args.remaining_file)
+    screenshot_note = "Yes" if made_screenshots_ok else "No (legacy .xls -- could not auto-extract)"
+    screenshot_note_r = "Yes" if remain_screenshots_ok else "No (legacy .xls -- could not auto-extract)"
     r = write_table(ws10, 3, ["Report", "Imported Rows", "Screenshot Included"],
-                     [["Payment Made", made_val['imported_rows'], "Yes"],
-                      ["Payment Remaining", remain_val['imported_rows'], "Yes"]])
+                     [["Payment Made", made_val['imported_rows'], screenshot_note],
+                      ["Payment Remaining", remain_val['imported_rows'], screenshot_note_r]])
     r += 1
     ws10.cell(row=r, column=1, value="Workbook Names").font = LABEL_FONT
     r += 1
@@ -742,7 +807,7 @@ def build(args):
         f"Invalid Values: {made_val['invalid_commission'] + remain_val['invalid_commission']}\n"
         f"Negative Values: {made_val['negative_commission'] + remain_val['negative_commission']}\n"
         f"Duplicate Transactions: {made_val['duplicate_transactions'] + remain_val['duplicate_transactions']}\n"
-        f"Screenshots Preserved: Yes (both workbooks, Audit Evidence sheet)"
+        f"Screenshots Preserved: {screenshot_note} (Payment Made) / {screenshot_note_r} (Payment Remaining)"
     )
     ws12.merge_cells(start_row=72, start_column=1, end_row=80, end_column=10)
     c = ws12.cell(row=72, column=1, value=dq_lines)
