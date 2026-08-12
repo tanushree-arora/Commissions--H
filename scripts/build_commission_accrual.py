@@ -379,6 +379,7 @@ def build(args):
     PAYMENT_REMAINING_TOTAL = sum(r['commission'] for r in remaining)
     ESTIMATED_COMMISSION = (PAYMENT_MADE_TOTAL / fiscal_divisor) * args.remaining_business_days
     FINAL_ACCRUAL = PAYMENT_MADE_TOTAL + PAYMENT_REMAINING_TOTAL + ESTIMATED_COMMISSION
+    EST_LABEL = f"{args.remaining_business_days} Days Remaining Estimated Commission"
 
     def allocate_estimate(dimension_made_total):
         if PAYMENT_MADE_TOTAL == 0:
@@ -501,14 +502,14 @@ def build(args):
         ("Remaining Business Days", args.remaining_business_days),
         ("Payment Made Total", PAYMENT_MADE_TOTAL),
         ("Payment Remaining Total", PAYMENT_REMAINING_TOTAL),
-        (f"{args.remaining_business_days} Days Remaining Estimated Commission", ESTIMATED_COMMISSION),
+        (EST_LABEL, ESTIMATED_COMMISSION),
         ("Final Accrual", FINAL_ACCRUAL),
     ]
     r = 3
     for label, val in rows_es:
         ws1.cell(row=r, column=1, value=label).font = LABEL_FONT
         cell = ws1.cell(row=r, column=2, value=val)
-        if label in ("Payment Made Total", "Payment Remaining Total", f"{args.remaining_business_days} Days Remaining Estimated Commission", "Final Accrual"):
+        if label in ("Payment Made Total", "Payment Remaining Total", EST_LABEL, "Final Accrual"):
             cell.number_format = CURRENCY
         r += 1
     ws1.cell(row=r + 1, column=1, value="Executive Commentary").font = LABEL_FONT
@@ -531,8 +532,8 @@ def build(args):
         ("Estimation Formula", "(Payment Made Total / Fiscal Divisor) x Remaining Business Days"),
         ("Date Column Used", "Invoice Date"),
         ("Aging As-Of Date", f"{aging_asof.strftime('%d-%b-%Y')}"),
-        ("Estimated Commission Allocation Method",
-         "Estimated Commission is prorated across Month-Year, Cost Center, Account, and Cost Center+Account "
+        (f"{EST_LABEL} Allocation Method",
+         f"{EST_LABEL} is prorated across Month-Year, Cost Center, Account, and Cost Center+Account "
          "rows in proportion to each row's share of Payment Made Total, so every summary sheet reconciles "
          "exactly to the overall Final Accrual."),
     ]
@@ -559,7 +560,7 @@ def build(args):
                   sum(m['remaining'] for m in month_year_summary),
                   sum(m['estimated'] for m in month_year_summary),
                   sum(m['total'] for m in month_year_summary)])
-    r = write_table(ws3, 3, ["Month-Year", "Payment Made", "Payment Remaining", "Estimated Commission", "Total Accrual"],
+    r = write_table(ws3, 3, ["Month-Year", "Payment Made", "Payment Remaining", EST_LABEL, "Total Accrual"],
                     rows3, currency_cols=(1, 2, 3, 4))
     for c in range(1, 6):
         ws3.cell(row=r - 1, column=c).font = Font(bold=True)
@@ -569,7 +570,7 @@ def build(args):
     ws4["A1"] = "Cost Center Summary"
     ws4["A1"].font = TITLE_FONT
     rows4 = [[c['cost_center'], c['made'], c['remaining'], c['estimated'], c['total']] for c in cost_center_summary]
-    write_table(ws4, 3, ["Cost Center", "Payment Made", "Payment Remaining", "Estimated Commission", "Total Accrual"],
+    write_table(ws4, 3, ["Cost Center", "Payment Made", "Payment Remaining", EST_LABEL, "Total Accrual"],
                 rows4, currency_cols=(1, 2, 3, 4))
 
     ws5 = wb.create_sheet("Cost Center + Account")
@@ -579,14 +580,14 @@ def build(args):
     rows5 = [[c['cost_center'], c['account'], c['made'], c['remaining'], c['estimated'], c['total']]
              for c in cc_account_summary]
     write_table(ws5, 3, ["Cost Center", "Bill To Account Number", "Payment Made", "Payment Remaining",
-                          "Estimated Commission", "Total Accrual"], rows5, currency_cols=(2, 3, 4, 5))
+                          EST_LABEL, "Total Accrual"], rows5, currency_cols=(2, 3, 4, 5))
 
     ws6 = wb.create_sheet("Account Summary")
     autosize(ws6, [22, 18, 18, 18, 18])
     ws6["A1"] = "Account Summary"
     ws6["A1"].font = TITLE_FONT
     rows6 = [[a['account'], a['made'], a['remaining'], a['estimated'], a['total']] for a in account_summary]
-    write_table(ws6, 3, ["Bill To Account Number", "Payment Made", "Payment Remaining", "Estimated Commission",
+    write_table(ws6, 3, ["Bill To Account Number", "Payment Made", "Payment Remaining", EST_LABEL,
                           "Total Accrual"], rows6, currency_cols=(1, 2, 3, 4))
 
     ws7 = wb.create_sheet("Aging Summary")
@@ -677,7 +678,7 @@ def build(args):
     ws12.merge_cells("A1:K1")
 
     kpis = [("Payment Made Total", PAYMENT_MADE_TOTAL), ("Payment Remaining Total", PAYMENT_REMAINING_TOTAL),
-            ("Estimated Commission", ESTIMATED_COMMISSION), ("Final Accrual", FINAL_ACCRUAL)]
+            (EST_LABEL, ESTIMATED_COMMISSION), ("Final Accrual", FINAL_ACCRUAL)]
     ws12.row_dimensions[2].height = 16
     ws12.row_dimensions[3].height = 28
     ws12.row_dimensions[4].height = 16
@@ -705,7 +706,7 @@ def build(args):
     ws12.cell(row=1, column=HCOL + 3, value="Component")
     ws12.cell(row=1, column=HCOL + 4, value="Amount")
     split_rows = [("Payment Made", PAYMENT_MADE_TOTAL), ("Payment Remaining", PAYMENT_REMAINING_TOTAL),
-                  ("Estimated Commission", ESTIMATED_COMMISSION)]
+                  (EST_LABEL, ESTIMATED_COMMISSION)]
     for i, (label, val) in enumerate(split_rows, start=2):
         ws12.cell(row=i, column=HCOL + 3, value=label)
         ws12.cell(row=i, column=HCOL + 4, value=val)
