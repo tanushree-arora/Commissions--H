@@ -501,14 +501,14 @@ def build(args):
         ("Remaining Business Days", args.remaining_business_days),
         ("Payment Made Total", PAYMENT_MADE_TOTAL),
         ("Payment Remaining Total", PAYMENT_REMAINING_TOTAL),
-        ("Estimated Commission", ESTIMATED_COMMISSION),
+        (f"{args.remaining_business_days} Days Remaining Estimated Commission", ESTIMATED_COMMISSION),
         ("Final Accrual", FINAL_ACCRUAL),
     ]
     r = 3
     for label, val in rows_es:
         ws1.cell(row=r, column=1, value=label).font = LABEL_FONT
         cell = ws1.cell(row=r, column=2, value=val)
-        if label in ("Payment Made Total", "Payment Remaining Total", "Estimated Commission", "Final Accrual"):
+        if label in ("Payment Made Total", "Payment Remaining Total", f"{args.remaining_business_days} Days Remaining Estimated Commission", "Final Accrual"):
             cell.number_format = CURRENCY
         r += 1
     ws1.cell(row=r + 1, column=1, value="Executive Commentary").font = LABEL_FONT
