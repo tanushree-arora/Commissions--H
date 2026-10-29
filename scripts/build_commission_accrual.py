@@ -24,21 +24,25 @@ Optional flags (see --help for the full list):
     --output                           Default: Commissions_Accrual_Output_<Period>_<Year>.xlsx
 
 Accepts both modern .xlsx and legacy .xls source files (auto-detected by
-extension). Note: embedded screenshot images can only be auto-extracted from
-.xlsx sources -- for .xls inputs, the Audit Evidence sheet and Validation
-Report will disclose that screenshots could not be extracted rather than
-silently omitting them.
+extension). Embedded screenshot images are extracted from both formats --
+.xlsx via its zip media folder, .xls via its IMDATA (DIB) records, the
+mechanism most .xls exports use for pasted/inserted pictures. If a source
+file genuinely has none (or uses an image format this script doesn't
+convert, e.g. WMF), the Audit Evidence sheet and Validation Report disclose
+that rather than silently omitting them.
 
-Requires: openpyxl, Pillow, xlrd (see requirements.txt).
+Requires: openpyxl, Pillow, xlrd, olefile (see requirements.txt).
 """
 import argparse
 import io
 import os
+import struct
 import sys
 import zipfile
 from collections import defaultdict, Counter
 from datetime import date, datetime
 
+import olefile
 import openpyxl
 import xlrd
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
@@ -274,17 +278,65 @@ def detect_asof_date(idx, rows):
     return None
 
 
-def extract_screenshot_images(path):
-    """Read embedded images from an .xlsx workbook's zip directly into memory.
+def _iter_biff_records(path):
+    """Yield (record_type, data) from a legacy .xls 'Book' stream, with
+    CONTINUE (0x003C) records transparently merged into the record they
+    continue -- required because images routinely exceed the ~8KB BIFF
+    record size limit and get split across several CONTINUE records."""
+    ole = olefile.OleFileIO(path)
+    stream_name = 'Book' if ole.exists('Book') else 'Workbook'
+    data = ole.openstream(stream_name).read()
+    i, n = 0, len(data)
+    cur_type, cur_data = None, bytearray()
+    while i + 4 <= n:
+        rtype = int.from_bytes(data[i:i + 2], 'little')
+        rlen = int.from_bytes(data[i + 2:i + 4], 'little')
+        rdata = data[i + 4:i + 4 + rlen]
+        i += 4 + rlen
+        if rtype == 0x003C:  # CONTINUE
+            if cur_type is not None:
+                cur_data += rdata
+            continue
+        if cur_type is not None:
+            yield cur_type, bytes(cur_data)
+        cur_type, cur_data = rtype, bytearray(rdata)
+    if cur_type is not None:
+        yield cur_type, bytes(cur_data)
 
-    Legacy .xls stores embedded pictures as Escher/OLE drawing records inside
-    the binary stream rather than as discrete zip entries, so there is no
-    equivalent lightweight extraction here -- callers must check
-    supports_screenshot_extraction(path) and disclose the gap rather than
-    silently claim screenshots were preserved.
+
+def _extract_screenshot_images_xls(path):
+    """Legacy .xls embeds pasted/inserted pictures as IMDATA records (BIFF
+    record type 0x7F), not the Escher/MSODRAWING mechanism .xlsx uses --
+    an easy thing to miss since a naive check for MSODRAWING alone finds
+    nothing even when images are genuinely present. The common case (format
+    code 9) is a raw DIB: a BITMAPCOREHEADER or BITMAPINFOHEADER followed
+    directly by pixel data, missing the 14-byte BITMAPFILEHEADER that makes
+    it a standalone, openable .bmp -- so reconstruct that header here.
     """
+    images = []
+    for rtype, rdata in _iter_biff_records(path):
+        if rtype != 0x7F or len(rdata) < 8:  # IMDATA
+            continue
+        cf = int.from_bytes(rdata[0:2], 'little')
+        lcb = int.from_bytes(rdata[4:8], 'little')
+        payload = rdata[8:8 + lcb]
+        if cf != 9 or len(payload) < 4:
+            # cf 2 (WMF) and others aren't reliably convertible without a
+            # metafile renderer; skip rather than embed something broken.
+            continue
+        dib_header_size = int.from_bytes(payload[0:4], 'little')
+        offset_bits = 14 + dib_header_size
+        file_size = 14 + len(payload)
+        bmp_header = b'BM' + struct.pack('<IHHI', file_size, 0, 0, offset_bits)
+        images.append((f'image{len(images) + 1}.bmp', bmp_header + payload))
+    return images
+
+
+def extract_screenshot_images(path):
+    """Read embedded images from a workbook into memory: from the .xlsx
+    zip's media folder, or from a legacy .xls file's IMDATA records."""
     if is_legacy_xls(path):
-        return []
+        return _extract_screenshot_images_xls(path)
     images = []
     z = zipfile.ZipFile(path)
     for name in sorted(n for n in z.namelist() if n.startswith('xl/media/')):
@@ -293,7 +345,7 @@ def extract_screenshot_images(path):
 
 
 def supports_screenshot_extraction(path):
-    return not is_legacy_xls(path)
+    return True
 
 
 # ---------------------------------------------------------------------------
@@ -628,10 +680,10 @@ def build(args):
     autosize(ws10, [30, 20, 20])
     ws10["A1"] = "Validation Report"
     ws10["A1"].font = TITLE_FONT
-    made_screenshots_ok = supports_screenshot_extraction(args.made_file)
-    remain_screenshots_ok = supports_screenshot_extraction(args.remaining_file)
-    screenshot_note = "Yes" if made_screenshots_ok else "No (legacy .xls -- could not auto-extract)"
-    screenshot_note_r = "Yes" if remain_screenshots_ok else "No (legacy .xls -- could not auto-extract)"
+    made_images = extract_screenshot_images(args.made_file)
+    remain_images = extract_screenshot_images(args.remaining_file)
+    screenshot_note = f"Yes ({len(made_images)})" if made_images else "No (none found in source file)"
+    screenshot_note_r = f"Yes ({len(remain_images)})" if remain_images else "No (none found in source file)"
     r = write_table(ws10, 3, ["Report", "Imported Rows", "Screenshot Included"],
                      [["Payment Made", made_val['imported_rows'], screenshot_note],
                       ["Payment Remaining", remain_val['imported_rows'], screenshot_note_r]])
@@ -659,10 +711,15 @@ def build(args):
     ws11["A1"] = "Audit Evidence — Screenshot sheets from source workbooks"
     ws11["A1"].font = TITLE_FONT
     row_cursor = 3
-    for label, path in [("Payment Made", args.made_file), ("Payment Remaining", args.remaining_file)]:
+    for label, path, images in [("Payment Made", args.made_file, made_images),
+                                 ("Payment Remaining", args.remaining_file, remain_images)]:
         ws11.cell(row=row_cursor, column=1, value=f"From {label} workbook: {path.split('/')[-1]}").font = LABEL_FONT
         row_cursor += 1
-        for name, data in extract_screenshot_images(path):
+        if not images:
+            ws11.cell(row=row_cursor, column=1, value="No screenshots found in this source file.")
+            row_cursor += 2
+            continue
+        for name, data in images:
             img = XLImage(io.BytesIO(data))
             img.anchor = f"A{row_cursor}"
             ws11.add_image(img)
